@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>AI RC Car Sim</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>AI RC Car Sim</h1>
+    <div class="connection">
+      <span id="status-dot" class="dot offline"></span>
+      <span id="status-text">disconnected</span>
+      <button id="btn-connect">Connect</button>
+      <button id="btn-reset" disabled>Reset world</button>
+    </div>
+  </header>
+
+  <main class="main">
+    <!-- LEFT: room simulator (actor C) -->
+    <section class="panel room-panel">
+      <h2>Room (C)</h2>
+      <canvas id="room" width="500" height="500"></canvas>
+      <div class="legend">
+        <span><span class="sw car"></span> car</span>
+        <span><span class="sw fov"></span> camera FOV</span>
+        <span><span class="sw football"></span> football</span>
+        <span><span class="sw key"></span> key</span>
+        <span><span class="sw chair"></span> chair</span>
+        <span><span class="sw table"></span> table</span>
+      </div>
+
+      <h3>Debug</h3>
+      <div class="debug">
+        <div><b>user command:</b> <span id="dbg-cmd">-</span></div>
+        <div><b>position:</b> <span id="dbg-pos">-</span></div>
+        <div><b>direction:</b> <span id="dbg-dir">-</span></div>
+        <div><b>visible:</b> <span id="dbg-visible">-</span></div>
+        <div><b>last action:</b> <span id="dbg-action">-</span></div>
+        <div><b>last LLM:</b> <pre id="dbg-llm">-</pre></div>
+      </div>
+    </section>
+
+    <!-- RIGHT: phone chat (actor A) -->
+    <section class="panel chat-panel">
+      <h2>Phone (A)</h2>
+      <div id="chat" class="chat"></div>
+      <div class="quick-buttons">
+        <button data-cmd="scan the room">Scan room</button>
+        <button data-cmd="find the football">Find football</button>
+        <button data-cmd="find the key">Find key</button>
+        <button data-cmd="what do you see">What do you see</button>
+        <button data-cmd="stop" class="danger">Stop</button>
+      </div>
+      <form id="chat-form" class="chat-form">
+        <input id="chat-input" type="text" placeholder="type a message..." autocomplete="off" />
+        <button type="submit">Send</button>
+      </form>
+    </section>
+  </main>
+
+  <!-- BOTTOM: communication log -->
+  <section class="panel logs-panel">
+    <h2>Communication log (A &harr; B &harr; C)</h2>
+    <div id="logs" class="logs"></div>
+  </section>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
