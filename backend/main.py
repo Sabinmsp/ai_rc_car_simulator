@@ -47,7 +47,7 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 # (not an image), so a vision model like qwen2.5vl isn't useful here and
 # is much slower per call (~5s vs <1s).
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:3b")
-TICK_SECONDS = float(os.environ.get("TICK_SECONDS", "0.3"))  # search-loop cadence
+TICK_SECONDS = float(os.environ.get("TICK_SECONDS", "0.35"))  # search-loop cadence
 GRID_SIZE = 10
 FOV_DEPTH = 8   # how many cells in front of the car the camera can see
 FOV_WIDTH = 5   # cone width (must be odd)
@@ -350,6 +350,57 @@ def _goal_to_target(goal: str) -> str:
     return ""
 
 
+def _target_position(room: RoomSimulator, name: str) -> Optional[tuple[int, int]]:
+    for o in room.objects:
+        if o.name == name:
+            return (o.x, o.y)
+    return None
+
+
+def _cell_in_front(room: RoomSimulator) -> tuple[int, int]:
+    dx, dy = DIR_VECTORS[room.car_dir]
+    return (room.car_x + dx, room.car_y + dy)
+
+
+_DIR_ORDER = ("N", "E", "S", "W")
+
+
+def _approach_action(room: RoomSimulator, target: tuple[int, int]) -> str:
+    """Greedy step that drives the car toward ``target`` and stops only
+    when the target is the cell directly in front of the car.
+
+    Strategy:
+        - face the target along its dominant axis, then
+        - drive forward until the target sits in the "in-front" cell.
+    """
+    tx, ty = target
+    front = _cell_in_front(room)
+    if front == (tx, ty):
+        return "stop"
+
+    ddx = tx - room.car_x
+    ddy = ty - room.car_y
+
+    # Pick the heading that reduces the larger remaining axis.
+    if abs(ddx) >= abs(ddy) and ddx != 0:
+        want = "E" if ddx > 0 else "W"
+    elif ddy != 0:
+        want = "S" if ddy > 0 else "N"
+    else:
+        return "stop"
+
+    if want != room.car_dir:
+        diff = (_DIR_ORDER.index(want) - _DIR_ORDER.index(room.car_dir)) % 4
+        return "turn_left" if diff == 3 else "turn_right"
+
+    # Already facing the target axis: drive forward if the next cell is clear,
+    # otherwise turn to try another approach (controller will auto-recover).
+    fx, fy = front
+    if room.in_bounds(fx, fy) and not room.cell_blocked(fx, fy):
+        return "move_forward"
+    return "turn_right"
+
+
 class LLMClient:
     """Talks to Ollama. Falls back to a deterministic mock if Ollama is down."""
 
@@ -542,9 +593,45 @@ class Session:
                     "visible_objects": camera["visible_objects"],
                 })
 
-                # 2) B -> LLM (with action history) and back
-                decision, source = await self.llm.decide(self.goal, camera, self.recent_actions[-5:])
-                await self.log_event("system", f"LLM decision via {source}", decision)
+                # Fast path: if the user goal names a specific target (e.g.
+                # "find the football"), skip the LLM entirely and let the
+                # greedy approach controller drive straight to it. Each LLM
+                # round-trip takes seconds; the controller runs per-tick.
+                # Open-ended goals (scan / describe) still go through the LLM.
+                target_name = _goal_to_target(self.goal)
+                target_pos = _target_position(self.room, target_name) if target_name else None
+                visible_names = {o["name"] for o in camera.get("visible_objects", [])}
+
+                if target_pos is not None:
+                    in_front = _cell_in_front(self.room) == target_pos
+                    if in_front:
+                        decision = {
+                            "visible_objects": list(visible_names),
+                            "target_found": True,
+                            "target_object": target_name,
+                            "confidence": 1.0,
+                            "next_action": "stop",
+                            "response_to_user": f"Stopped right in front of the {target_name}.",
+                        }
+                    else:
+                        decision = {
+                            "visible_objects": list(visible_names),
+                            "target_found": False,
+                            "target_object": target_name,
+                            "confidence": 0.9,
+                            "next_action": _approach_action(self.room, target_pos),
+                            "response_to_user": (
+                                f"Heading toward the {target_name}."
+                                if target_name not in visible_names
+                                else f"I can see the {target_name} — moving closer to stop in front of it."
+                            ),
+                        }
+                    source = "controller"
+                    await self.log_event("system", f"controller approach -> {decision['next_action']}", decision)
+                else:
+                    # 2) B -> LLM (with action history) and back
+                    decision, source = await self.llm.decide(self.goal, camera, self.recent_actions[-5:])
+                    await self.log_event("system", f"LLM decision via {source}", decision)
 
                 # 3) B -> A : human-friendly reply
                 await self.send("chat", role="assistant", text=decision["response_to_user"] or "(no message)")

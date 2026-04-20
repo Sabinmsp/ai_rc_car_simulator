@@ -19,16 +19,6 @@
   const elChat       = $("chat");
   const elChatForm   = $("chat-form");
   const elChatInput  = $("chat-input");
-  const elLogs       = $("logs");
-
-  const dbg = {
-    cmd:     $("dbg-cmd"),
-    pos:     $("dbg-pos"),
-    dir:     $("dbg-dir"),
-    visible: $("dbg-visible"),
-    action:  $("dbg-action"),
-    llm:     $("dbg-llm"),
-  };
 
   const canvas = $("room");
   const ctx = canvas.getContext("2d");
@@ -87,16 +77,13 @@
       case "world":
         world = msg;
         drawWorld();
-        updateDebugFromWorld();
         break;
       case "chat":
         addChatMsg(msg.role, msg.text);
         break;
       case "log":
-        addLogRow(msg.channel, msg.text, msg.data);
-        if (msg.channel === "system" && msg.data && typeof msg.data === "object" && "next_action" in msg.data) {
-          dbg.llm.textContent = JSON.stringify(msg.data, null, 2);
-        }
+        // log messages are still sent by the server for debugging but the
+        // phone UI doesn't render them any more.
         break;
     }
   }
@@ -117,47 +104,6 @@
     div.textContent = text;
     elChat.appendChild(div);
     elChat.scrollTop = elChat.scrollHeight;
-  }
-
-  function addLogRow(channel, text, data) {
-    const map = {
-      "A->B":   "A2B",
-      "B->C":   "B2C",
-      "C->B":   "C2B",
-      "B->A":   "B2A",
-      "system": "SYS",
-    };
-    const cls = map[channel] || "SYS";
-    const time = new Date().toLocaleTimeString();
-    const row = document.createElement("div");
-    row.className = "log-row";
-    const dataStr = data && Object.keys(data).length ? ` ${JSON.stringify(data)}` : "";
-    row.innerHTML = `
-      <span class="time">${time}</span>
-      <span class="ch ${cls}">${channel}</span>
-      <span class="text">${escapeHtml(text)}<span class="data">${escapeHtml(dataStr)}</span></span>
-    `;
-    elLogs.appendChild(row);
-    elLogs.scrollTop = elLogs.scrollHeight;
-  }
-
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, (c) => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-    }[c]));
-  }
-
-  // ---- Debug panel --------------------------------------------------------
-
-  function updateDebugFromWorld() {
-    if (!world) return;
-    dbg.pos.textContent = `(${world.car.x}, ${world.car.y})`;
-    dbg.dir.textContent = world.car.dir;
-    dbg.action.textContent = world.last_action || "-";
-    // visible objects come from C->B logs; here we approximate from FOV cells
-    const fovSet = new Set(world.fov_cells.map(([x, y]) => `${x},${y}`));
-    const visible = world.objects.filter(o => fovSet.has(`${o.x},${o.y}`)).map(o => o.name);
-    dbg.visible.textContent = visible.length ? visible.join(", ") : "(none)";
   }
 
   // ---- Room canvas --------------------------------------------------------
@@ -263,7 +209,6 @@
     const text = elChatInput.value.trim();
     if (!text) return;
     addChatMsg("user", text);
-    dbg.cmd.textContent = text;
     send({ type: "user_message", text });
     elChatInput.value = "";
   });
@@ -272,11 +217,23 @@
     btn.addEventListener("click", () => {
       const cmd = btn.dataset.cmd;
       addChatMsg("user", cmd);
-      dbg.cmd.textContent = cmd;
       if (cmd === "stop") send({ type: "stop" });
       else send({ type: "user_message", text: cmd });
     });
   });
+
+  // phone status-bar clock
+  const elPhoneTime = document.getElementById("phone-time");
+  function updatePhoneClock() {
+    if (!elPhoneTime) return;
+    const d = new Date();
+    let h = d.getHours();
+    const m = String(d.getMinutes()).padStart(2, "0");
+    h = h % 12; if (h === 0) h = 12;
+    elPhoneTime.textContent = `${h}:${m}`;
+  }
+  updatePhoneClock();
+  setInterval(updatePhoneClock, 30_000);
 
   // initial empty draw
   const initBg = ctx.createRadialGradient(
