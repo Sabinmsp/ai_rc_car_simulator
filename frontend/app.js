@@ -170,82 +170,82 @@
 
     ctx.clearRect(0, 0, W, H);
 
-    // grid background
-    ctx.fillStyle = "#0a0c10";
+    // background gradient
+    const bg = ctx.createRadialGradient(W / 2, H / 2, 50, W / 2, H / 2, W * 0.75);
+    bg.addColorStop(0, "#0e1320");
+    bg.addColorStop(1, "#05070c");
+    ctx.fillStyle = bg;
     ctx.fillRect(0, 0, W, H);
 
-    // FOV cells
-    ctx.fillStyle = "rgba(250, 204, 21, 0.20)";
+    // FOV cells: fade by distance from car
+    const carCx = world.car.x * cell + cell / 2;
+    const carCy = world.car.y * cell + cell / 2;
     for (const [x, y] of world.fov_cells) {
+      const cx = x * cell + cell / 2;
+      const cy = y * cell + cell / 2;
+      const dist = Math.hypot(cx - carCx, cy - carCy);
+      const maxDist = cell * 8;
+      const alpha = Math.max(0.08, 0.35 * (1 - dist / maxDist));
+      ctx.fillStyle = `rgba(250, 204, 21, ${alpha})`;
       ctx.fillRect(x * cell, y * cell, cell, cell);
     }
 
-    // walls (drawn before grid lines so the lines outline them subtly)
-    ctx.fillStyle = "#475569";
+    // walls — brick-like look with subtle top highlight
     const walls = world.walls || [];
     for (const [x, y] of walls) {
-      ctx.fillRect(x * cell, y * cell, cell, cell);
-      ctx.strokeStyle = "#64748b";
-      ctx.lineWidth = 2;
-      ctx.strokeRect(x * cell + 1, y * cell + 1, cell - 2, cell - 2);
+      const px = x * cell, py = y * cell;
+      const grd = ctx.createLinearGradient(px, py, px, py + cell);
+      grd.addColorStop(0, "#5b6576");
+      grd.addColorStop(1, "#394252");
+      ctx.fillStyle = grd;
+      ctx.fillRect(px + 1, py + 1, cell - 2, cell - 2);
+      ctx.strokeStyle = "#2a313e";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(px + 1.5, py + 1.5, cell - 3, cell - 3);
     }
 
-    // grid lines
-    ctx.strokeStyle = "#1f2530";
+    // grid lines (very subtle)
+    ctx.strokeStyle = "rgba(255,255,255,0.04)";
     ctx.lineWidth = 1;
     for (let i = 0; i <= N; i++) {
       ctx.beginPath(); ctx.moveTo(i * cell, 0); ctx.lineTo(i * cell, N * cell); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(0, i * cell); ctx.lineTo(N * cell, i * cell); ctx.stroke();
     }
 
-    // objects
-    const colors = {
-      football: "#f97316",
-      key:      "#facc15",
-      chair:    "#a78bfa",
-      table:    "#94a3b8",
+    // objects: emojis, one per cell (car is drawn afterwards so it sits on top)
+    const emojis = {
+      football: "⚽",
+      key:      "🔑",
+      chair:    "🪑",
+      dog:      "🐶",
     };
-    ctx.font = "bold 11px sans-serif";
+    const emojiFont = `${Math.floor(cell * 0.75)}px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif`;
+    ctx.font = emojiFont;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     for (const o of world.objects) {
       const cx = o.x * cell + cell / 2;
       const cy = o.y * cell + cell / 2;
-      ctx.fillStyle = colors[o.name] || "#fff";
-      ctx.beginPath();
-      ctx.arc(cx, cy, cell * 0.35, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = "#0a0c10";
-      ctx.fillText(o.name[0].toUpperCase(), cx, cy);
+      ctx.fillText(emojis[o.name] || "❓", cx, cy);
     }
 
-    // car
+    // car (emoji)
     drawCar(ctx, world.car, cell);
   }
 
   function drawCar(ctx, car, cell) {
     const cx = car.x * cell + cell / 2;
     const cy = car.y * cell + cell / 2;
-    const r = cell * 0.4;
 
     ctx.save();
     ctx.translate(cx, cy);
-    const rot = { N: -Math.PI / 2, E: 0, S: Math.PI / 2, W: Math.PI }[car.dir] || 0;
-    ctx.rotate(rot);
-
-    // body
-    ctx.fillStyle = "#60a5fa";
-    ctx.fillRect(-r, -r * 0.6, r * 2, r * 1.2);
-
-    // nose triangle (points to "forward" = +x in local frame)
-    ctx.fillStyle = "#bfdbfe";
-    ctx.beginPath();
-    ctx.moveTo(r, 0);
-    ctx.lineTo(r * 0.4, -r * 0.6);
-    ctx.lineTo(r * 0.4,  r * 0.6);
-    ctx.closePath();
-    ctx.fill();
-
+    // Car glyph is always drawn facing up, regardless of car.dir.
+    // (The FOV cone on the canvas still reflects the true heading.)
+    ctx.rotate(-Math.PI / 2);
+    ctx.font = `${Math.floor(cell * 0.82)}px "Apple Color Emoji","Segoe UI Emoji","Noto Color Emoji",sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("🚗", 0, 0);
     ctx.restore();
   }
 
@@ -279,10 +279,16 @@
   });
 
   // initial empty draw
-  ctx.fillStyle = "#0a0c10";
+  const initBg = ctx.createRadialGradient(
+    canvas.width / 2, canvas.height / 2, 50,
+    canvas.width / 2, canvas.height / 2, canvas.width * 0.75
+  );
+  initBg.addColorStop(0, "#0e1320");
+  initBg.addColorStop(1, "#05070c");
+  ctx.fillStyle = initBg;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#6b7280";
+  ctx.fillStyle = "#6b7380";
   ctx.textAlign = "center";
-  ctx.font = "14px sans-serif";
+  ctx.font = "14px -apple-system, Inter, sans-serif";
   ctx.fillText("Click 'Connect' to start", canvas.width / 2, canvas.height / 2);
 })();

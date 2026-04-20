@@ -1,4 +1,4 @@
-# AI RC Car Sim
+# AI RC Car Simulator
 
 A tiny **simulation-only** sandbox for understanding the communication loop
 between three actors:

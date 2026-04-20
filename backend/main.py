@@ -113,7 +113,7 @@ class RoomSimulator:
         WorldObject("football", 5, 2),
         WorldObject("key",      8, 6),
         WorldObject("chair",    3, 4),
-        WorldObject("table",    6, 7),
+        WorldObject("dog",      6, 7),
     ])
     walls: set[tuple[int, int]] = field(default_factory=lambda: set(DEFAULT_WALLS))
     last_action: str = "idle"
@@ -127,9 +127,9 @@ class RoomSimulator:
         # walls are hard obstacles
         if (x, y) in self.walls:
             return True
-        # chair and table also act as obstacles; football & key are pickup-able
+        # chair and dog also act as obstacles; football & key are pickup-able
         for o in self.objects:
-            if o.x == x and o.y == y and o.name in {"chair", "table"}:
+            if o.x == x and o.y == y and o.name in {"chair", "dog"}:
                 return True
         return False
 
@@ -344,7 +344,7 @@ def _normalize_decision(raw: dict, goal: str, camera: dict) -> dict:
 
 def _goal_to_target(goal: str) -> str:
     g = (goal or "").lower()
-    for name in ("football", "key", "chair", "table"):
+    for name in ("football", "key", "chair", "dog"):
         if name in g:
             return name
     return ""
@@ -603,7 +603,7 @@ class Session:
 # FastAPI app
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="AI RC Car Sim")
+app = FastAPI(title="AI RC Car Simulator")
 llm = LLMClient()
 
 
