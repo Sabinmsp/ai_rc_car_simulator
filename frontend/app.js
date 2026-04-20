@@ -180,6 +180,16 @@
       ctx.fillRect(x * cell, y * cell, cell, cell);
     }
 
+    // walls (drawn before grid lines so the lines outline them subtly)
+    ctx.fillStyle = "#475569";
+    const walls = world.walls || [];
+    for (const [x, y] of walls) {
+      ctx.fillRect(x * cell, y * cell, cell, cell);
+      ctx.strokeStyle = "#64748b";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(x * cell + 1, y * cell + 1, cell - 2, cell - 2);
+    }
+
     // grid lines
     ctx.strokeStyle = "#1f2530";
     ctx.lineWidth = 1;

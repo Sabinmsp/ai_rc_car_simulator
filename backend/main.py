@@ -43,9 +43,14 @@ from fastapi.staticfiles import StaticFiles
 # ---------------------------------------------------------------------------
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5vl:3b")
-TICK_SECONDS = 1.0  # how often the search loop runs while active
+# Default to a small, fast TEXT model. The camera frame we send is JSON
+# (not an image), so a vision model like qwen2.5vl isn't useful here and
+# is much slower per call (~5s vs <1s).
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5-coder:3b")
+TICK_SECONDS = float(os.environ.get("TICK_SECONDS", "0.3"))  # search-loop cadence
 GRID_SIZE = 10
+FOV_DEPTH = 8   # how many cells in front of the car the camera can see
+FOV_WIDTH = 5   # cone width (must be odd)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("rc-sim")
@@ -86,6 +91,19 @@ class WorldObject:
     y: int
 
 
+# Static walls. Each tuple is a grid cell (x, y) the car cannot enter and
+# the camera cannot see through. The layout below creates two "rooms"
+# connected by a doorway at (4, 5), plus a small inner divider near the
+# football to make exploration interesting.
+DEFAULT_WALLS: set[tuple[int, int]] = {
+    # vertical wall down the middle with a doorway gap at y=5
+    (4, 1), (4, 2), (4, 3), (4, 4),
+    (4, 6), (4, 7), (4, 8),
+    # short horizontal stub on the right (a partial divider)
+    (6, 5), (7, 5), (8, 5),
+}
+
+
 @dataclass
 class RoomSimulator:
     car_x: int = 1
@@ -97,6 +115,7 @@ class RoomSimulator:
         WorldObject("chair",    3, 4),
         WorldObject("table",    6, 7),
     ])
+    walls: set[tuple[int, int]] = field(default_factory=lambda: set(DEFAULT_WALLS))
     last_action: str = "idle"
 
     # ---- pose helpers -----------------------------------------------------
@@ -105,7 +124,10 @@ class RoomSimulator:
         return 0 <= x < GRID_SIZE and 0 <= y < GRID_SIZE
 
     def cell_blocked(self, x: int, y: int) -> bool:
-        # chair and table act as obstacles; football & key are pickup-able
+        # walls are hard obstacles
+        if (x, y) in self.walls:
+            return True
+        # chair and table also act as obstacles; football & key are pickup-able
         for o in self.objects:
             if o.x == x and o.y == y and o.name in {"chair", "table"}:
                 return True
@@ -137,17 +159,32 @@ class RoomSimulator:
     # ---- fake camera ------------------------------------------------------
 
     def field_of_view_cells(self) -> list[tuple[int, int]]:
-        """Return the grid cells the car can 'see' (a small cone in front)."""
+        """Return the grid cells the car can 'see' (a cone in front).
+
+        Cone widens with distance (FOV_DEPTH / FOV_WIDTH). Walls block the
+        view: along each "column" of the cone we walk outward from the car
+        and stop the moment we hit a wall — anything past it is hidden,
+        same as a real camera.
+        """
         dx, dy = DIR_VECTORS[self.car_dir]
-        # perpendicular vector for cone width
-        px, py = -dy, dx
+        px, py = -dy, dx  # perpendicular axis for cone width
+        half = FOV_WIDTH // 2
         cells: list[tuple[int, int]] = []
-        for depth in range(1, 5):  # 4 cells deep
-            for offset in (-1, 0, 1):  # 3 cells wide at each depth
+        for offset in range(-half, half + 1):
+            for depth in range(1, FOV_DEPTH + 1):
+                # the cone widens with depth; ignore offsets that aren't
+                # wide enough yet at this depth
+                allowed = min(half, 1 + depth // 2)
+                if abs(offset) > allowed:
+                    continue
                 cx = self.car_x + dx * depth + px * offset
                 cy = self.car_y + dy * depth + py * offset
-                if self.in_bounds(cx, cy):
-                    cells.append((cx, cy))
+                if not self.in_bounds(cx, cy):
+                    break
+                cells.append((cx, cy))
+                # wall occludes anything further in this column
+                if (cx, cy) in self.walls:
+                    break
         return cells
 
     def camera_view(self) -> dict:
@@ -183,6 +220,7 @@ class RoomSimulator:
             "grid_size": GRID_SIZE,
             "car": {"x": self.car_x, "y": self.car_y, "dir": self.car_dir},
             "objects": [asdict(o) for o in self.objects],
+            "walls": sorted(self.walls),
             "fov_cells": self.field_of_view_cells(),
             "last_action": self.last_action,
         }
@@ -227,31 +265,37 @@ def safe_apply_action(room: RoomSimulator, action: str) -> str:
 # LLM client (actor B's brain) - Ollama, with mock fallback
 # ---------------------------------------------------------------------------
 
-LLM_SYSTEM_PROMPT = """You are the brain of a small RC car searching a room.
-You receive a user goal and the car's current camera view.
-You must reply with STRICT JSON only. No prose, no markdown.
+LLM_SYSTEM_PROMPT = """You are the brain of a small RC car searching a 10x10 grid room.
+You receive a user goal, the car's current camera view, and a short history
+of your recent actions. You must reply with STRICT JSON only.
 
 JSON schema (all fields required):
 {
   "visible_objects": [string, ...],
   "target_found": boolean,
   "target_object": string,
-  "confidence": number,            // 0.0 - 1.0
+  "confidence": number,
   "next_action": string,           // one of: "move_forward","turn_left","turn_right","stop"
   "response_to_user": string
 }
 
-Rules:
-- If the target object appears in visible_objects with a clear line of sight, set target_found=true and next_action="stop".
-- If you don't see the target, choose a sensible scanning action ("turn_left", "turn_right", or "move_forward").
+Navigation policy (follow strictly):
+- If the target appears in visible_objects: target_found=true, next_action="stop".
+- If the target is NOT visible:
+    * Avoid spinning in place. If your last 2-3 actions were all turns,
+      choose "move_forward" to explore new ground.
+    * Prefer "move_forward" when the path ahead is clear (no obstacle in
+      visible_objects directly in front).
+    * Use "turn_left"/"turn_right" only to scan, then move.
 - Never output any field other than those listed above.
-- Never output explanations outside the JSON.
+- Output ONLY the JSON object, no prose, no markdown fences.
 """
 
 
-def build_user_prompt(goal: str, camera: dict) -> str:
+def build_user_prompt(goal: str, camera: dict, recent_actions: list[str]) -> str:
     return (
         f"User goal: {goal or 'just look around'}\n"
+        f"Recent actions (oldest -> newest): {recent_actions or ['(none)']}\n"
         f"Camera view JSON: {json.dumps(camera)}\n"
         "Respond with the JSON object only."
     )
@@ -314,31 +358,31 @@ class LLMClient:
         self.model = model
         self.mock_mode = False  # flips to True after first failed call
 
-    async def decide(self, goal: str, camera: dict) -> tuple[dict, str]:
+    async def decide(self, goal: str, camera: dict, recent_actions: list[str]) -> tuple[dict, str]:
         """Return (decision_dict, source) where source is 'ollama' or 'mock'."""
         if not self.mock_mode:
             try:
-                raw = await self._call_ollama(goal, camera)
+                raw = await self._call_ollama(goal, camera, recent_actions)
                 parsed = _extract_json(raw)
                 if parsed is None:
                     log.warning("Ollama returned non-JSON, using mock. Raw: %r", raw[:200])
-                    return self._mock_decide(goal, camera), "mock"
+                    return self._mock_decide(goal, camera, recent_actions), "mock"
                 return _normalize_decision(parsed, goal, camera), "ollama"
             except Exception as e:
                 log.warning("Ollama call failed (%s). Falling back to mock for this session.", e)
                 self.mock_mode = True
-        return self._mock_decide(goal, camera), "mock"
+        return self._mock_decide(goal, camera, recent_actions), "mock"
 
-    async def _call_ollama(self, goal: str, camera: dict) -> str:
+    async def _call_ollama(self, goal: str, camera: dict, recent_actions: list[str]) -> str:
         payload = {
             "model": self.model,
             "system": LLM_SYSTEM_PROMPT,
-            "prompt": build_user_prompt(goal, camera),
+            "prompt": build_user_prompt(goal, camera, recent_actions),
             "stream": False,
             "format": "json",
             "options": {"temperature": 0.2},
         }
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.post(f"{self.url}/api/generate", json=payload)
             r.raise_for_status()
             data = r.json()
@@ -346,7 +390,7 @@ class LLMClient:
 
     # ---- deterministic mock so the demo always works ----------------------
 
-    def _mock_decide(self, goal: str, camera: dict) -> dict:
+    def _mock_decide(self, goal: str, camera: dict, recent_actions: list[str]) -> dict:
         target = _goal_to_target(goal)
         visible = camera.get("visible_objects", [])
         visible_names = [o["name"] for o in visible]
@@ -363,19 +407,29 @@ class LLMClient:
                 "response_to_user": f"Found the {target}! It's {obj['distance']} cells ahead, {obj['horizontal']}.",
             }, goal, camera)
 
-        # If we see *something*, drive toward it (great heuristic for a demo)
+        # Anti-spin: if last 2 actions were turns, just drive forward.
+        recent_turns = sum(1 for a in recent_actions[-2:] if a in {"turn_left", "turn_right"})
+        if recent_turns >= 2:
+            return _normalize_decision({
+                "visible_objects": visible_names,
+                "target_found": False,
+                "target_object": target,
+                "confidence": 0.2,
+                "next_action": "move_forward",
+                "response_to_user": "Done scanning, moving forward to explore.",
+            }, goal, camera)
+
+        # If we see something not in front, turn toward it; if in front, drive.
         if visible:
-            obj = visible[0]
-            if obj["horizontal"] == "left":
-                action = "turn_left"
-            elif obj["horizontal"] == "right":
-                action = "turn_right"
-            else:
+            # check if anything is directly ahead (horizontal=center, dist small)
+            ahead = next((o for o in visible if o["horizontal"] == "center"), None)
+            if ahead:
                 action = "move_forward"
-            msg = (
-                f"Looking for {target or 'something'}. I can see a {obj['name']} "
-                f"to the {obj['horizontal']}, scanning further."
-            )
+                msg = f"Driving forward toward the {ahead['name']}."
+            else:
+                obj = visible[0]
+                action = "turn_left" if obj["horizontal"] == "left" else "turn_right"
+                msg = f"Saw a {obj['name']} on the {obj['horizontal']}, turning."
             return _normalize_decision({
                 "visible_objects": visible_names,
                 "target_found": False,
@@ -385,13 +439,15 @@ class LLMClient:
                 "response_to_user": msg,
             }, goal, camera)
 
-        # Nothing visible: do a slow rotational scan
+        # Nothing visible: alternate between scan-turn and forward-explore.
+        last = recent_actions[-1] if recent_actions else ""
+        action = "move_forward" if last == "turn_right" else "turn_right"
         return _normalize_decision({
             "visible_objects": [],
             "target_found": False,
             "target_object": target,
             "confidence": 0.1,
-            "next_action": "turn_right",
+            "next_action": action,
             "response_to_user": f"Scanning for {target or 'objects'}...",
         }, goal, camera)
 
@@ -408,6 +464,8 @@ class Session:
         self.goal: str = ""
         self.searching: bool = False
         self.search_task: Optional[asyncio.Task] = None
+        self.recent_actions: list[str] = []          # last N high-level actions
+        self.last_positions: list[tuple[int, int]] = []  # last N (x,y) for stuck-detection
 
     async def send(self, kind: str, **payload) -> None:
         try:
@@ -468,7 +526,9 @@ class Session:
             await self.log_event("system", f"search stopped: {reason}")
 
     async def _search_loop(self, single_tick: bool = False) -> None:
-        max_ticks = 1 if single_tick else 60  # safety cap (~1 minute)
+        max_ticks = 1 if single_tick else 200  # safety cap
+        self.recent_actions = []
+        self.last_positions = [(self.room.car_x, self.room.car_y)]
         try:
             for tick in range(max_ticks):
                 if not self.searching:
@@ -482,30 +542,53 @@ class Session:
                     "visible_objects": camera["visible_objects"],
                 })
 
-                # 2) B -> LLM and back
-                decision, source = await self.llm.decide(self.goal, camera)
+                # 2) B -> LLM (with action history) and back
+                decision, source = await self.llm.decide(self.goal, camera, self.recent_actions[-5:])
                 await self.log_event("system", f"LLM decision via {source}", decision)
 
                 # 3) B -> A : human-friendly reply
                 await self.send("chat", role="assistant", text=decision["response_to_user"] or "(no message)")
                 await self.log_event("B->A", decision["response_to_user"] or "(no message)")
 
-                if decision["target_found"] or decision["next_action"] == "stop":
-                    # 4) B -> C : explicit stop
+                if decision["target_found"]:
                     result = safe_apply_action(self.room, "stop")
                     await self.log_event("B->C", "command: stop", {"result": result})
                     await self.push_world()
-                    if decision["target_found"]:
-                        await self.log_event("system", f"target found: {decision['target_object']}")
+                    await self.log_event("system", f"target found: {decision['target_object']}")
                     self.searching = False
                     break
 
-                # 4) B -> C : safe command
+                # 4) Anti-stuck: if the car has been stuck in the same cell
+                #    for the last 4 actions and the LLM keeps choosing turns,
+                #    override with move_forward to break out of the spin.
                 action = decision["next_action"]
+                if (
+                    action in {"turn_left", "turn_right", "stop"}
+                    and len(self.last_positions) >= 4
+                    and len(set(self.last_positions[-4:])) == 1
+                ):
+                    await self.log_event(
+                        "system",
+                        f"controller override: car stuck at {self.last_positions[-1]}, forcing move_forward",
+                    )
+                    action = "move_forward"
+
+                # 5) B -> C : safe command
                 result = safe_apply_action(self.room, action)
                 await self.log_event("B->C", f"command: {action}", {"result": result})
-                await self.push_world()
 
+                # If the override (or LLM) tried to drive into a wall/obstacle,
+                # rotate next time so we don't bash forever.
+                if result in {"blocked_by_wall", "blocked_by_obstacle"}:
+                    safe_apply_action(self.room, "turn_right")
+                    await self.log_event("B->C", "command: turn_right (auto-recover from block)")
+
+                self.recent_actions.append(action)
+                self.last_positions.append((self.room.car_x, self.room.car_y))
+                self.last_positions = self.last_positions[-10:]
+                self.recent_actions = self.recent_actions[-10:]
+
+                await self.push_world()
                 await asyncio.sleep(TICK_SECONDS)
         except asyncio.CancelledError:
             raise

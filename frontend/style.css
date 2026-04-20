@@ -71,6 +71,7 @@ h3 { font-size: 13px; color: #9aa0a6; margin-top: 12px; }
 }
 .sw.car      { background: #60a5fa; }
 .sw.fov      { background: rgba(250, 204, 21, 0.4); }
+.sw.wall     { background: #475569; }
 .sw.football { background: #f97316; }
 .sw.key      { background: #facc15; }
 .sw.chair    { background: #a78bfa; }
